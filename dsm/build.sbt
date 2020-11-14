@@ -27,6 +27,12 @@ version := "1.0"
 
 libraryDependencies += "org.scala-lang.modules" %% "scala-parser-combinators" % "1.1.2"
 
+libraryDependencies += "dev.zio" %% "zio" % "1.0.3"
+libraryDependencies += "dev.zio" %% "zio-interop-cats" % "2.2.0.1"
+
+libraryDependencies += "org.typelevel" %% "cats-core" % "2.2.0"
+libraryDependencies += "org.typelevel" %% "cats-effect" % "2.2.0"
+
 // Here, `libraryDependencies` is a set of dependencies, and by using `+=`,
 // we're adding the scala-parser-combinators dependency to the set of dependencies
 // that sbt will go and fetch when it starts up.
@@ -75,3 +81,5 @@ libraryDependencies += "org.scala-lang.modules" %% "scala-parser-combinators" % 
 
 // To learn more about multi-project builds, head over to the official sbt
 // documentation at http://www.scala-sbt.org/documentation.html
+
+Global / onChangedBuildSource := ReloadOnSourceChanges
