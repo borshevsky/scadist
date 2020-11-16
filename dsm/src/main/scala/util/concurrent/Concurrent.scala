@@ -19,6 +19,13 @@ package object concurrent {
       got <- f.get
     } yield (values)
 
+  def race3[F[_]: Concurrent, A, B, C](a: F[A], b: F[B], c: F[C]): F[(Option[A], Option[B], Option[C])] =
+    Concurrent[F].race(a, Concurrent[F].race(b, c)) flatMap {
+      case Left(a)         => (a.some, none[B], none[C]).pure[F]
+      case Right(Left(b))  => (none[A], b.some, none[C]).pure[F]
+      case Right(Right(c)) => (none[A], none[B], c.some).pure[F]
+    }
+
   private type D[F[_]] = Deferred[F, Unit]
   private type R[F[_]] = Ref[F, Int]
 

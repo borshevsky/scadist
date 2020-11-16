@@ -13,9 +13,9 @@ scalaVersion := "2.13.3"
 
 // It's possible to define many kinds of settings, such as:
 
-name := "hello-world"
-organization := "ch.epfl.scala"
-version := "1.0"
+name := "dsm"
+organization := "github.com/borshevsky"
+version := "0.0.1"
 
 // Note, it's not required for you to define these three settings. These are
 // mostly only necessary if you intend to publish your library's binaries on a
@@ -32,6 +32,8 @@ libraryDependencies += "dev.zio" %% "zio-interop-cats" % "2.2.0.1"
 
 libraryDependencies += "org.typelevel" %% "cats-core" % "2.2.0"
 libraryDependencies += "org.typelevel" %% "cats-effect" % "2.2.0"
+
+libraryDependencies += "co.fs2" %% "fs2-core" % "2.4.4"
 
 // Here, `libraryDependencies` is a set of dependencies, and by using `+=`,
 // we're adding the scala-parser-combinators dependency to the set of dependencies
