@@ -85,3 +85,6 @@ libraryDependencies += "co.fs2" %% "fs2-core" % "2.4.4"
 // documentation at http://www.scala-sbt.org/documentation.html
 
 Global / onChangedBuildSource := ReloadOnSourceChanges
+cancelable in Global := true
+//fork in run := true
+connectInput in run := true
