@@ -16,17 +16,15 @@ object Main extends App {
 
     import Raft._
 
-    val nodes = ('A' to 'B').toList.map(id => Node.make[Task](id.toString))
+   val nodes = ('A' to 'C').toList.map(id => Node.make[Task](id.toString))
 
-    implicit val cluster = Cluster.make(nodes)
+   val program = for {
+     remotes <- nodes.map(node => LocalRemoteNode.apply[F](node)).sequence
+     _ <- remotes.traverse(r => r.run(remotes.filter(n => n != r)))
+   } yield ()
 
-    val lifetime = new Lifetime[F]
-
-    val worker = nodes.map(n => Concurrent[F].start(lifetime.node(n))).sequence
-
-    worker
-      .map(_.map(_.join).sequence)
-      .flatMap(_ => ZIO.succeed(ExitCode.success))
+   program
+      .as(ExitCode.success)
       .catchAll(_ => ZIO.succeed(ExitCode.failure))
   }
 }

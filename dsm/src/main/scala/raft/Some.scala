@@ -1,6 +1,7 @@
 package raft
 
 import cats._
+import cats.data.State
 import cats.implicits._
 import cats.effect._
 import cats.effect.concurrent._
@@ -18,35 +19,39 @@ object Raft {
   case class AppendEntries()
 
   trait Node[F[_]] {
-    def id: String
-    def requestVote(candidate: Candidate[F] with Node[F]): F[Boolean]
+    def id: F[String]
+    def requestVote(candidate: Candidate[F]): F[Boolean]
     def appendEntries: F[Unit]
   }
 
-  trait Leader[F[_]] {
-    sealed trait LeaderCommmand
+  sealed abstract class LocalNode[F[_]](node: Node[F]) extends Node[F] {
+    override def appendEntries: F[Unit]                           = node.appendEntries
+    override def id: F[String]                                    = node.id
+    override def requestVote(candidate: Candidate[F]): F[Boolean] = node.requestVote(candidate)
+  }
 
+  abstract class Leader[F[_]](node: Node[F]) extends LocalNode[F](node) {
     def run: F[Follower[F]]
   }
 
-  trait Follower[F[_]] {
+  abstract class Follower[F[_]](node: Node[F]) extends LocalNode[F](node) {
     def run: F[Candidate[F]]
   }
 
-  trait Candidate[F[_]] { this: Node[F] =>
-    def run: F[Either[Follower[F], Leader[F]]]
+  abstract class Candidate[F[_]](node: Node[F]) extends LocalNode[F](node) {
+    def run(peers: List[RemoteNode[F]]): F[Either[Follower[F], Leader[F]]]
   }
 
   /////////////////////////////////
 
   object Leader {
-    def make[F[_]: Sync: Timer: Concurrent](node: Node[F])(implicit cluster: Cluster[F]): Leader[F] =
-      new Leader[F] {
+    def make[F[_]: Sync: Timer: Concurrent](node: Node[F], peers: List[RemoteNode[F]]): Leader[F] =
+      new Leader[F](node) {
         override def run: F[Follower[F]] = {
           val loop = for {
-            _       <- Sync[F].delay(println(s"Node ${node.id} is a Leader"))
-            nodes   <- cluster.nodes
-            workers <- nodes.map(node => Concurrent[F].start(node.appendEntries)).sequence.map(_.map(_.join))
+            id      <- node.id
+            _       <- Sync[F].delay(println(s"Node ${id} is a Leader"))
+            workers <- peers.map(node => Concurrent[F].start(node.appendEntries)).sequence.map(_.map(_.join))
             _       <- Timer[F].sleep(1.second)
           } yield ()
 
@@ -64,33 +69,30 @@ object Raft {
   object Candidate {
     def apply[F[_]: Concurrent: Timer](
         node: Node[F]
-    )(implicit cluster: Cluster[F]): F[Node[F] with Candidate[F]] = {
+    ): F[Candidate[F]] = {
       for {
         anotherLeaderElected <- Deferred[F, Unit]
       } yield {
-        new Node[F] with Candidate[F] {
+        new Candidate[F](node) {
           type Timeout = Unit
           val timeoutDuration = 3000.millis
 
-          override def id: String                                                    = node.id
-          override def requestVote(candidate: Candidate[F] with Node[F]): F[Boolean] = node.requestVote(candidate)
           override def appendEntries: F[Unit] =
             Sync[F].delay(println(s"${node.id}: received append entries")) *> node.appendEntries *> anotherLeaderElected
               .complete(())
 
-          override def run: F[Either[Follower[F], Leader[F]]] = {
-            election.flatMap {
-              case Timeout              => run
-              case NotChosen            => run
+          override def run(peers: List[RemoteNode[F]]): F[Either[Follower[F], Leader[F]]] = {
+            election(peers).flatMap {
+              case Timeout              => run(peers)
+              case NotChosen            => run(peers)
               case AnotherLeaderElected => Follower.make[F](node).asLeft[Leader[F]].pure[F]
-              case Leadership           => Leader.make[F](node).asRight[Follower[F]].pure[F]
+              case Leadership           => Leader.make[F](node, peers).asRight[Follower[F]].pure[F]
             }
           }
 
-          def election: F[ElectionResult] =
+          def election(peers: List[RemoteNode[F]]): F[ElectionResult] =
             for {
-              nodes  <- cluster.nodes
-              result <- collectVotes(nodes, timeoutDuration, anotherLeaderElected)
+              result <- collectVotes(peers, timeoutDuration, anotherLeaderElected)
             } yield result
 
           def collectVotes(
@@ -174,10 +176,14 @@ object Raft {
 
   object Follower {
     def make[F[_]: Sync: Timer](node: Node[F]): Follower[F] =
-      new Follower[F] {
+      new Follower[F](node) {
         override def run: F[Candidate[F]] =
-          (Sync[F].delay(println(s"Node ${node.id} is a Follower")) *> Timer[F].sleep(1.second)).foreverM
+          (node.id.flatMap(id => Sync[F].delay(println(s"Node ${id} is a Follower"))) *> Timer[F].sleep(
+            1.second
+          )).foreverM
       }
+
+    def apply[F[_]: Sync: Timer](node: Node[F]): F[Follower[F]] = Sync[F].delay(make[F](node))
   }
 
   trait Cluster[F[_]] {
@@ -191,31 +197,83 @@ object Raft {
       }
   }
 
-  class Lifetime[F[_]: Concurrent: Timer](implicit cluster: Cluster[F]) {
-    def node(node: Node[F]): F[Unit] = Candidate.apply[F](node).flatMap(candidate(_))
+  class Worker[F[_]: Concurrent: Timer](me: LocalNode[F]) extends Node[F] {
+    override def id: F[String]                                    = me.id
+    override def requestVote(candidate: Candidate[F]): F[Boolean] = me.requestVote(candidate)
+    override def appendEntries: F[Unit]                           = me.appendEntries
 
-    def candidate(candidate: Candidate[F]): F[Unit] = {
-      candidate.run.flatMap {
-        case Left(f)  => follower(f)
-        case Right(l) => leader(l)
+    def run(peers: List[RemoteNode[F]]): F[Worker[F]] =
+      me match {
+        case c: Candidate[F] => candidate(c, peers)
+        case f: Follower[F]  => follower(f, peers)
+        case l: Leader[F]    => leader(l, peers)
+      }
+
+    def candidate(candidate: Candidate[F], peers: List[RemoteNode[F]]): F[Worker[F]] = {
+      candidate.run(peers).map {
+        case Left(f)  => new Worker(f)
+        case Right(l) => new Worker(l)
       }
     }
 
-    def follower(follower: Follower[F]): F[Unit] =
-      follower.run.flatMap(candidate(_))
+    def follower(follower: Follower[F], peers: List[RemoteNode[F]]): F[Worker[F]] =
+      follower.run.map(candidate => new Worker(candidate))
 
-    def leader(leader: Leader[F]): F[Unit] =
-      leader.run.flatMap(follower(_))
+    def leader(leader: Leader[F], peers: List[RemoteNode[F]]): F[Worker[F]] =
+      leader.run.map(follower => new Worker(follower))
+  }
+
+  object Worker {
+    def make[F[_]: Concurrent: Timer](me: Node[F]): F[Worker[F]] = {
+      //Follower.apply[F](me).map(follower => new Worker[F](follower))
+      Candidate.apply[F](me).map(follower => new Worker[F](follower))
+    }
+  }
+
+  trait RemoteNode[F[_]] extends Node[F]
+
+  trait LocalRemoteNode[F[_]] extends RemoteNode[F] {
+    def run(peers: List[RemoteNode[F]]): F[Unit]
+  }
+
+  object LocalRemoteNode {
+    def apply[F[_]: Concurrent: Timer](node: Node[F]): F[LocalRemoteNode[F]] =
+      for {
+        worker <- Worker.make[F](node)
+        ref    <- Ref.of[F, Worker[F]](worker)
+        p      <- Deferred[F, List[RemoteNode[F]]]
+        _      <- Concurrent[F].start(loop(ref, p))
+      } yield new LocalRemoteNode[F] {
+        override def run(peers: List[RemoteNode[F]]): F[Unit] = p.complete(peers)
+
+        override def id: F[String]                                    = ref.get.flatMap(_.id)
+        override def requestVote(candidate: Candidate[F]): F[Boolean] = ref.get.flatMap(_.requestVote(candidate))
+        override def appendEntries: F[Unit]                           = ref.get.flatMap(_.appendEntries)
+      }
+
+    private def loop[F[_]: Monad](ref: Ref[F, Worker[F]], peers: Deferred[F, List[RemoteNode[F]]]): F[Unit] = {
+      def go(p: List[RemoteNode[F]]) =
+        for {
+          w  <- ref.get
+          nW <- w.run(p)
+          _  <- ref.set(nW)
+        } yield ()
+
+      peers.get.flatMap(p => go(p).foreverM)
+    }
   }
 
   object Node {
     def make[F[_]: Applicative: Concurrent: Timer](nodeId: String): Node[F] =
       new Node[F] {
-        override def id: String = nodeId
-        override def requestVote(candidate: Candidate[F] with Node[F]): F[Boolean] =
-          Sync[F].delay(println(s"$id: Node ${candidate.id} requested vote")) *> Timer[F].sleep(
-            1500.millis
-          ) *> (candidate.id === "A").pure[F]
+        override def id: F[String] = nodeId.pure[F]
+        override def requestVote(candidate: Candidate[F]): F[Boolean] =
+          for {
+            me  <- id
+            cid <- candidate.id
+            _   <- Sync[F].delay(println(s"$me: Node $cid requested vote"))
+            _   <- Timer[F].sleep(1500.millis)
+          } yield cid === "A"
         override def appendEntries: F[Unit] = Sync[F].delay(println("Base append entries")) *> Applicative[F].unit
       }
   }
