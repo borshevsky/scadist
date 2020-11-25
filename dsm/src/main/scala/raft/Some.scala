@@ -55,7 +55,7 @@ object Raft {
             _       <- Timer[F].sleep(1.second)
           } yield ()
 
-          loop.foreverM
+          loop.replicateA(3) *> Timer[F].sleep(15.second) *> Follower.apply[F](node)
         }
       }
   }
@@ -77,15 +77,13 @@ object Raft {
           type Timeout = Unit
           val timeoutDuration = 3000.millis
 
-          override def appendEntries: F[Unit] =
-            Sync[F].delay(println(s"${node.id}: received append entries")) *> node.appendEntries *> anotherLeaderElected
-              .complete(())
+          override def appendEntries: F[Unit] = node.appendEntries *> anotherLeaderElected.complete(())
 
           override def run(peers: List[RemoteNode[F]]): F[Either[Follower[F], Leader[F]]] = {
             election(peers).flatMap {
               case Timeout              => run(peers)
               case NotChosen            => run(peers)
-              case AnotherLeaderElected => Follower.make[F](node).asLeft[Leader[F]].pure[F]
+              case AnotherLeaderElected => Follower.apply[F](node).flatMap(f => f.asLeft[Leader[F]].pure[F])
               case Leadership           => Leader.make[F](node, peers).asRight[Follower[F]].pure[F]
             }
           }
@@ -128,7 +126,7 @@ object Raft {
               .flatMap(interrupted(timeout, _))
               .flatMap(interrupted(leaderElected, _))
               .flatMap(interrupted(majorityCollected, _))
-              .flatMap(_.join.flatTap(v => Sync[F].delay(println(s"${node.id}: $v"))).map {
+              .flatMap(_.join.map {
                 case Left(_)                    => Leadership
                 case Right(Left(_))             => AnotherLeaderElected
                 case Right(Right(Left(_)))      => Timeout
@@ -175,29 +173,23 @@ object Raft {
   }
 
   object Follower {
-    def make[F[_]: Sync: Timer](node: Node[F]): Follower[F] =
-      new Follower[F](node) {
-        override def run: F[Candidate[F]] =
-          (node.id.flatMap(id => Sync[F].delay(println(s"Node ${id} is a Follower"))) *> Timer[F].sleep(
-            1.second
-          )).foreverM
-      }
-
     def apply[F[_]: Sync: Timer: Concurrent](node: Node[F]): F[Follower[F]] =
       for {
         m <- MVar[F].empty[Unit]
       } yield new Follower[F](node) {
         override def run: F[Candidate[F]] =
           for {
-            me <- id
-            _ <- Sync[F].delay(println(s"$me is a Follower"))
+            me      <- id
+            _       <- Sync[F].delay(println(s"$me is a Follower"))
             timeout <- Concurrent[F].start(Timer[F].sleep(3000.millis))
             res     <- Concurrent[F].race(timeout.join, m.take)
             r <- res match {
-              case Left(value)  => Candidate.apply[F](node)
-              case Right(value) => run
+              case Left(value)  => Sync[F].delay(println("Convert to candidate now")) *> Candidate.apply[F](node)
+              case Right(value) => Sync[F].delay(println("Received heartbeat")) *> run
             }
           } yield r
+
+        override def appendEntries: F[Unit] = m.put(()) *> node.appendEntries
       }
   }
 
