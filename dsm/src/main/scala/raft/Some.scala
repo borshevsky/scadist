@@ -183,7 +183,22 @@ object Raft {
           )).foreverM
       }
 
-    def apply[F[_]: Sync: Timer](node: Node[F]): F[Follower[F]] = Sync[F].delay(make[F](node))
+    def apply[F[_]: Sync: Timer: Concurrent](node: Node[F]): F[Follower[F]] =
+      for {
+        m <- MVar[F].empty[Unit]
+      } yield new Follower[F](node) {
+        override def run: F[Candidate[F]] =
+          for {
+            me <- id
+            _ <- Sync[F].delay(println(s"$me is a Follower"))
+            timeout <- Concurrent[F].start(Timer[F].sleep(3000.millis))
+            res     <- Concurrent[F].race(timeout.join, m.take)
+            r <- res match {
+              case Left(value)  => Candidate.apply[F](node)
+              case Right(value) => run
+            }
+          } yield r
+      }
   }
 
   trait Cluster[F[_]] {
@@ -225,8 +240,7 @@ object Raft {
 
   object Worker {
     def make[F[_]: Concurrent: Timer](me: Node[F]): F[Worker[F]] = {
-      //Follower.apply[F](me).map(follower => new Worker[F](follower))
-      Candidate.apply[F](me).map(follower => new Worker[F](follower))
+      Follower.apply[F](me).map(follower => new Worker[F](follower))
     }
   }
 

@@ -4,7 +4,7 @@ import zio.interop.catz.implicits._
 
 import cats._
 import cats.implicits._
-import cats.effect.{Concurrent}
+import cats.effect.{Concurrent, Sync}
 
 import cats.effect.concurrent.Deferred
 
@@ -21,6 +21,7 @@ object Main extends App {
    val program = for {
      remotes <- nodes.map(node => LocalRemoteNode.apply[F](node)).sequence
      _ <- remotes.traverse(r => r.run(remotes.filter(n => n != r)))
+     _ <- Sync[F].delay(println("done"))
    } yield ()
 
    program
