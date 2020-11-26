@@ -83,7 +83,7 @@ object Raft {
             election(peers).flatMap {
               case Timeout              => run(peers)
               case NotChosen            => run(peers)
-              case AnotherLeaderElected => Follower.apply[F](node).flatMap(f => f.asLeft[Leader[F]].pure[F])
+              case AnotherLeaderElected => Follower.apply[F](node).map(f => f.asLeft[Leader[F]])
               case Leadership           => Leader.make[F](node, peers).asRight[Follower[F]].pure[F]
             }
           }
@@ -102,7 +102,7 @@ object Raft {
               timeout <- timeoutTo(timeout)
               waiter  <- Waiter.make[F](majority(nodes))
               results <-
-                nodes
+                (nodes :+ node)
                   .map(node =>
                     Concurrent[F].start(work(node, timeout.join, waiter.get, anotherLeaderElected.get, waiter))
                   )
@@ -193,17 +193,6 @@ object Raft {
       }
   }
 
-  trait Cluster[F[_]] {
-    def nodes: F[List[Node[F]]]
-  }
-
-  object Cluster {
-    def make[F[_]: Applicative](peers: List[Node[F]]): Cluster[F] =
-      new Cluster[F] {
-        override def nodes: F[List[Node[F]]] = peers.pure[F]
-      }
-  }
-
   class Worker[F[_]: Concurrent: Timer](me: LocalNode[F]) extends Node[F] {
     override def id: F[String]                                    = me.id
     override def requestVote(candidate: Candidate[F]): F[Boolean] = me.requestVote(candidate)
@@ -239,7 +228,7 @@ object Raft {
   trait RemoteNode[F[_]] extends Node[F]
 
   trait LocalRemoteNode[F[_]] extends RemoteNode[F] {
-    def run(peers: List[RemoteNode[F]]): F[Unit]
+    def run(peers: List[RemoteNode[F]]): F[Fiber[F, Unit]]
   }
 
   object LocalRemoteNode {
@@ -248,9 +237,8 @@ object Raft {
         worker <- Worker.make[F](node)
         ref    <- Ref.of[F, Worker[F]](worker)
         p      <- Deferred[F, List[RemoteNode[F]]]
-        _      <- Concurrent[F].start(loop(ref, p))
       } yield new LocalRemoteNode[F] {
-        override def run(peers: List[RemoteNode[F]]): F[Unit] = p.complete(peers)
+        override def run(peers: List[RemoteNode[F]]): F[Fiber[F, Unit]] = p.complete(peers) *> Concurrent[F].start(loop(ref, p))
 
         override def id: F[String]                                    = ref.get.flatMap(_.id)
         override def requestVote(candidate: Candidate[F]): F[Boolean] = ref.get.flatMap(_.requestVote(candidate))
@@ -279,7 +267,7 @@ object Raft {
             cid <- candidate.id
             _   <- Sync[F].delay(println(s"$me: Node $cid requested vote"))
             _   <- Timer[F].sleep(1500.millis)
-          } yield cid === "A"
+          } yield (cid === "A" || cid === me)
         override def appendEntries: F[Unit] = Sync[F].delay(println("Base append entries")) *> Applicative[F].unit
       }
   }

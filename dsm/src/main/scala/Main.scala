@@ -20,12 +20,13 @@ object Main extends App {
 
    val program = for {
      remotes <- nodes.map(node => LocalRemoteNode.apply[F](node)).sequence
-     _ <- remotes.traverse(r => r.run(remotes.filter(n => n != r)))
-     _ <- Sync[F].delay(println("done"))
-   } yield ()
+     f <- remotes.parTraverse(r => r.run(remotes.filter(n => n != r)))
+   } yield f
 
-   program
-      .as(ExitCode.success)
-      .catchAll(_ => ZIO.succeed(ExitCode.failure))
+   program.flatMap(fs =>
+      fs.map(_.join).sequence
+        .onInterrupt(fs.map(_.cancel).sequence.catchAll(_ =>  ZIO.effectTotal(println("Cancelled")) *> ZIO.succeed(ExitCode.failure)))
+        .as(ExitCode.success)
+   ).catchAll(_ => ZIO.succeed(ExitCode.failure))
   }
 }
